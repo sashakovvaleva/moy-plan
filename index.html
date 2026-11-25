@@ -168,6 +168,15 @@ input{font:inherit;color:inherit}
 .toast.show{opacity:1;transform:translate(-50%,0)}
 details summary{list-style:none;cursor:pointer}
 details summary::-webkit-details-marker{display:none}
+/* время и напоминания */
+.timefield{flex:1;display:flex;align-items:center;gap:6px;background:rgba(255,255,255,.95);border:1.5px solid var(--line);border-radius:16px;padding-left:14px;color:var(--muted);font-size:14px;white-space:nowrap}
+.timefield input{border:0!important;box-shadow:none!important;background:transparent!important;padding:12px 12px 12px 4px!important;flex:1;min-height:46px;color:var(--text);text-align:right}
+.two{display:flex;gap:8px}
+.tm{display:inline-block;background:var(--rose-soft);color:var(--rose-deep);font-weight:700;font-size:13px;border-radius:9px;padding:2px 8px;margin-right:8px;vertical-align:1px}
+.item.done .tm{opacity:.6}
+.bell{border:0;background:none;color:#D9B8C4;width:34px;height:34px;border-radius:50%;display:grid;place-items:center;flex:none;padding:0}
+.bell svg{width:21px;height:21px}
+.bell.on{color:var(--rose-deep);background:var(--rose-soft)}
 /* копилка */
 .seg.three button{font-size:14px;padding:9px 2px}
 .seg.three svg{width:15px;height:15px;margin-right:4px}
@@ -272,6 +281,7 @@ details summary::-webkit-details-marker{display:none}
 'use strict';
 /* ============ helpers ============ */
 const $ = s => document.querySelector(s);
+const APP_VERSION = '1.5';
 const KEY = 'myplan.v1';
 const MONTHS = ['Январь','Февраль','Март','Апрель','Май','Июнь','Июль','Август','Сентябрь','Октябрь','Ноябрь','Декабрь'];
 const MONTHS_GEN = ['января','февраля','марта','апреля','мая','июня','июля','августа','сентября','октября','ноября','декабря'];
@@ -516,6 +526,57 @@ function depSheetHtml() {
     </form>`;
 }
 
+/* ============ reminders (Календарь iPhone) ============ */
+const BELL = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M6 16V11a6 6 0 1 1 12 0v5l1.5 2h-15z"/><path d="M10 20.5a2 2 0 0 0 4 0"/></svg>';
+const REMIND = [['m', 'Утром в 9:00'], ['1440', 'За день'], ['60', 'За 1 час'], ['15', 'За 15 мин'], ['0', 'В момент начала']];
+const icsDate = d => d.toISOString().replace(/[-:]/g, '').replace(/\.\d+/, '');
+const icsLocal = d => `${d.getFullYear()}${pad(d.getMonth() + 1)}${pad(d.getDate())}T${pad(d.getHours())}${pad(d.getMinutes())}00`;
+const icsEsc = v => String(v).replace(/\\/g, '\\\\').replace(/;/g, '\;').replace(/,/g, '\\,').replace(/\r?\n/g, '\\n');
+function buildIcs(t) {
+  const [y, m, d] = t.date.split('-').map(Number), [hh, mm] = t.time.split(':').map(Number);
+  const start = new Date(y, m - 1, d, hh, mm), end = new Date(y, m - 1, d, hh, mm + 60);
+  const L = ['BEGIN:VCALENDAR', 'VERSION:2.0', 'PRODID:-//Moy Plan//RU', 'CALSCALE:GREGORIAN', 'METHOD:PUBLISH', 'BEGIN:VEVENT',
+    `UID:${t.id}@moy-plan`, `DTSTAMP:${icsDate(new Date())}`, `DTSTART:${icsLocal(start)}`, `DTEND:${icsLocal(end)}`, `SUMMARY:${icsEsc(t.text)}`];
+  if (t.weekly) L.push('RRULE:FREQ=WEEKLY');
+  for (const a of (t.alarms || [])) {
+    let mins = a === 'm' ? hh * 60 + mm - 540 : +a;           // минут до начала
+    const trig = mins > 0 ? `TRIGGER:-PT${mins}M` : mins < 0 ? `TRIGGER:PT${-mins}M` : 'TRIGGER:PT0M';
+    L.push('BEGIN:VALARM', 'ACTION:DISPLAY', `DESCRIPTION:${icsEsc(t.text)}`, trig, 'END:VALARM');
+  }
+  L.push('END:VEVENT', 'END:VCALENDAR');
+  return L.join('\r\n') + '\r\n';
+}
+function openIcs(ics) {
+  // Файл создаёт service worker прямо на телефоне (работает без интернета);
+  // ответ помечен как вложение, поэтому приложение остаётся открытым, а iPhone предлагает добавить событие в Календарь.
+  if ('serviceWorker' in navigator && navigator.serviceWorker.controller) { location.href = 'event.ics?c=' + encodeURIComponent(ics); return; }
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(new Blob([ics], { type: 'text/calendar' })); a.download = 'napominanie.ics';
+  document.body.appendChild(a); a.click(); setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 4000);
+}
+let sheetTask = null;
+function taskSheetHtml() {
+  const t = sheetTask;
+  return `${SPRIG}<div class="handle"></div><h3>Дело</h3>
+    <form data-form="task-save" autocomplete="off">
+      <input name="text" value="${esc(t.text)}" placeholder="Что нужно сделать">
+      <div class="two"><label class="timefield"><span>День</span><input type="date" name="date" value="${t.date}"></label>
+        <label class="timefield"><span>Время</span><input type="time" name="time" value="${t.time || ''}"></label></div>
+      <label class="lbl">Когда напомнить</label>
+      <div class="gchips">${REMIND.map(([v, l]) => `<button type="button" class="gchip ${t.alarms.includes(v) ? 'on' : ''}" data-act="task-alarm" data-v="${v}">${l}</button>`).join('')}</div>
+      <div class="gchips"><button type="button" class="gchip ${t.weekly ? 'on' : ''}" data-act="task-weekly">🔁 Повторять каждую неделю</button></div>
+      <div class="calc">Напоминание добавится в Календарь iPhone и придёт <b>даже без интернета</b>. Виджет «Календарь» покажет его на экране «Домой».</div>
+      <button class="primary" type="submit" value="cal">🔔 Добавить в Календарь</button>
+      <button class="btn" style="width:100%" type="submit" value="save">Просто сохранить</button>
+      ${t.cal ? `<button type="button" class="ghost" data-act="task-share">Календарь не открылся? Отправить файл</button>` : ''}
+      <button type="button" class="del" data-act="task-del-sheet">Удалить дело</button>
+    </form>`;
+}
+function syncTask() {
+  const f = $('#sheet form[data-form="task-save"]'); if (!f || !sheetTask) return;
+  sheetTask.text = f.text.value; sheetTask.date = f.date.value || sheetTask.date; sheetTask.time = f.time.value;
+}
+
 /* ============ views ============ */
 function viewToday() {
   const d = UI.day, isToday = d === today();
@@ -538,15 +599,19 @@ function viewToday() {
       <div class="small muted">Сделано</div><div class="big">${done} из ${list.length}</div><div class="cheer">${cheer}</div></div></div>
       <div class="prog"><i style="width:${list.length ? done / list.length * 100 : 0}%"></i></div></div>`;
 
-  h += `<form class="add" data-form="task-add"><input name="text" placeholder="Новое дело…" autocomplete="off" enterkeyhint="done"><button class="addbtn" aria-label="Добавить">+</button></form>`;
+  h += `<form class="add" data-form="task-add" style="flex-wrap:wrap"><input name="text" placeholder="Новое дело…" autocomplete="off" enterkeyhint="done" style="flex:1 1 100%">
+    <label class="timefield"><span>🕓 Время</span><input type="time" name="time" aria-label="Время (необязательно)"></label>
+    <button class="addbtn" aria-label="Добавить">+</button></form>`;
 
   if (yest.length) h += `<button class="btn" style="width:100%;margin-bottom:12px" data-act="carry">↪ Перенести невыполненные со вчера (${yest.length})</button>`;
 
   if (list.length) {
-    const sorted = [...list].sort((a, b) => a.done - b.done);
+    const sorted = [...list].sort((a, b) => (a.done - b.done) || (a.time || '99').localeCompare(b.time || '99'));
     h += `<div class="list">${sorted.map(t => `<div class="item ${t.done ? 'done' : ''}">
       <button class="check ${t.done ? 'on' : ''}" data-act="task-toggle" data-id="${t.id}" aria-label="Готово"></button>
-      <div class="txt main" data-act="task-edit" data-id="${t.id}">${esc(t.text)}</div>
+      <div class="txt" data-act="task-open" data-id="${t.id}">${t.time ? `<span class="tm">${t.time}</span>` : ''}<span class="main">${esc(t.text)}</span>
+        ${t.cal ? `<div class="meta">в Календаре${t.weekly ? ' · каждую неделю' : ''}</div>` : ''}</div>
+      ${t.time && !t.done ? `<button class="bell ${t.cal ? 'on' : ''}" data-act="task-open" data-id="${t.id}" aria-label="Напоминание">${BELL}</button>` : ''}
       <button class="x" data-act="task-del" data-id="${t.id}" aria-label="Удалить">×</button></div>`).join('')}</div>`;
   } else {
     h += `<div class="empty">${SPRIG}${isToday ? 'Дел на сегодня пока нет. Добавьте первое' : 'На этот день ничего не запланировано'}</div>`;
@@ -715,7 +780,7 @@ function viewMore() {
     <div class="btns" style="margin:0"><button class="btn" data-act="export">⬆︎ Сохранить копию</button><button class="btn" data-act="import">⬇︎ Восстановить</button></div></div>`;
 
   h += `<div class="section">Опасная зона</div><button class="btn danger" style="width:100%" data-act="wipe">Удалить все данные</button>
-    <div class="note" style="text-align:center;margin-top:18px">Мой план 🌸 работает без интернета</div>`;
+    <div class="note" style="text-align:center;margin-top:18px">Мой план 🌸 версия ${APP_VERSION} · работает без интернета</div>`;
   return h;
 }
 
@@ -727,7 +792,7 @@ function render() {
 
 /* ============ transaction sheet ============ */
 function openSheet(html) { $('#sheet').innerHTML = html; $('#overlay').classList.add('show'); $('#sheet').classList.add('show'); }
-function closeSheet() { $('#overlay').classList.remove('show'); $('#sheet').classList.remove('show'); sheetTx = null; sheetSave = null; sheetDep = null; }
+function closeSheet() { $('#overlay').classList.remove('show'); $('#sheet').classList.remove('show'); sheetTx = null; sheetSave = null; sheetDep = null; sheetTask = null; }
 
 function txSheetHtml() {
   const tx = sheetTx, isExp = tx.type === 'expense';
@@ -765,10 +830,28 @@ const actions = {
 
   'task-toggle'(el) { const t = (S.tasks[UI.day] || []).find(x => x.id === el.dataset.id); if (t) { t.done = !t.done; save(); render(); } },
   'task-del'(el) { S.tasks[UI.day] = (S.tasks[UI.day] || []).filter(x => x.id !== el.dataset.id); if (!S.tasks[UI.day].length) delete S.tasks[UI.day]; save(); render(); },
-  'task-edit'(el) {
+  'task-open'(el) {
     const t = (S.tasks[UI.day] || []).find(x => x.id === el.dataset.id); if (!t) return;
-    const v = prompt('Изменить дело', t.text); if (v === null) return;
-    if (v.trim()) { t.text = v.trim(); save(); render(); }
+    const alarms = t.alarms && t.alarms.length ? [...t.alarms] : (t.time && t.time >= '10:00' ? ['m', '60'] : ['60']);
+    sheetTask = { ...t, alarms, date: UI.day, origDate: UI.day };
+    openSheet(taskSheetHtml());
+  },
+  'task-alarm'(el) {
+    const v = el.dataset.v, a = sheetTask.alarms;
+    sheetTask.alarms = a.includes(v) ? a.filter(x => x !== v) : [...a, v];
+    el.classList.toggle('on');
+  },
+  'task-weekly'(el) { sheetTask.weekly = !sheetTask.weekly; el.classList.toggle('on'); },
+  async 'task-share'() {
+    syncTask(); if (!sheetTask.time) return;
+    const file = new File([buildIcs(sheetTask)], 'napominanie.ics', { type: 'text/calendar' });
+    if (navigator.canShare && navigator.canShare({ files: [file] })) { try { await navigator.share({ files: [file] }); } catch (e) {} }
+    else toast('На этом устройстве отправка файлов недоступна');
+  },
+  'task-del-sheet'() {
+    const d = sheetTask.origDate;
+    S.tasks[d] = (S.tasks[d] || []).filter(x => x.id !== sheetTask.id); if (!S.tasks[d].length) delete S.tasks[d];
+    save(); closeSheet(); render(); toast('Дело удалено');
   },
   carry() {
     const y = addDays(UI.day, -1), undone = (S.tasks[y] || []).filter(x => !x.done);
@@ -895,8 +978,26 @@ document.addEventListener('click', e => {
 const forms = {
   'task-add'(f) {
     const text = f.text.value.trim(); if (!text) return;
-    (S.tasks[UI.day] = S.tasks[UI.day] || []).push({ id: uid(), text, done: false });
-    save(); render(); const i = $('[data-form="task-add"] input'); i && i.focus();
+    const time = f.time.value || null;
+    (S.tasks[UI.day] = S.tasks[UI.day] || []).push({ id: uid(), text, done: false, time });
+    save(); render();
+    if (time) toast('Нажмите 🔔 у дела, чтобы получить напоминание');
+    else { const i = $('[data-form="task-add"] input'); i && i.focus(); }
+  },
+  'task-save'(f, btn) {
+    syncTask();
+    const t = sheetTask, text = (t.text || '').trim();
+    if (!text) { toast('Напишите, что нужно сделать'); return; }
+    const wantCal = btn && btn.value === 'cal';
+    if (wantCal && !t.time) { toast('Укажите время'); f.time.focus(); return; }
+    if (wantCal && !t.alarms.length) { toast('Выберите, когда напомнить'); return; }
+    const rec = { id: t.id, text, done: !!t.done, time: t.time || null, alarms: t.alarms, weekly: !!t.weekly, cal: !!t.cal || wantCal };
+    const from = t.origDate, to = t.date || from;
+    S.tasks[from] = (S.tasks[from] || []).filter(x => x.id !== t.id); if (!S.tasks[from].length) delete S.tasks[from];
+    (S.tasks[to] = S.tasks[to] || []).push(rec);
+    if (wantCal) openIcs(buildIcs({ ...rec, date: to }));
+    save(); closeSheet(); render();
+    toast(wantCal ? 'Нажмите «Добавить» в Календаре 🌷' : to !== from ? `Перенесено на ${dayLong(to)}` : 'Сохранено');
   },
   'goal-add'(f) {
     const text = f.text.value.trim(); if (!text) { f.text.focus(); return; }
@@ -951,7 +1052,7 @@ const forms = {
 };
 document.addEventListener('submit', e => {
   const f = e.target.closest('[data-form]'); if (!f) return;
-  e.preventDefault(); forms[f.dataset.form] && forms[f.dataset.form](f);
+  e.preventDefault(); forms[f.dataset.form] && forms[f.dataset.form](f, e.submitter);
 });
 
 document.addEventListener('input', e => {
@@ -982,7 +1083,15 @@ applyIncomes();
 render();
 
 if ('serviceWorker' in navigator && (location.protocol === 'https:' || location.hostname === 'localhost')) {
-  navigator.serviceWorker.register('sw.js').catch(() => {});
+  let hadController = !!navigator.serviceWorker.controller;
+  navigator.serviceWorker.addEventListener('controllerchange', () => {
+    if (hadController) { sessionStorage.setItem('updated', '1'); location.reload(); }
+    hadController = true;
+  });
+  navigator.serviceWorker.register('sw.js').then(reg => {
+    document.addEventListener('visibilitychange', () => { if (!document.hidden) reg.update().catch(() => {}); });
+  }).catch(() => {});
+  try { if (sessionStorage.getItem('updated')) { sessionStorage.removeItem('updated'); setTimeout(() => toast('Приложение обновлено до версии ' + APP_VERSION + ' 🌸'), 500); } } catch (e) {}
 }
 </script>
 </body>
